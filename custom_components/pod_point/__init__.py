@@ -80,8 +80,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         hass, client=client, scan_interval=scan_interval
     )
 
-    # Check the credentials we have and ensure that we can perform a refresh
-    await coordinator.async_config_entry_first_refresh()
+    # FIX: Wrap the first refresh in the executor to prevent blocking the loop
+    await hass.async_add_executor_job(
+        coordinator.config_entry_first_refresh_sync
+    )
 
     # Given a successful inital refresh, store this coordinator for this specific config entry
     hass.data[DOMAIN][entry.entry_id] = coordinator
