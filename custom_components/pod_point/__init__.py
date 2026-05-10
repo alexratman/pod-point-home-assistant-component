@@ -1,26 +1,16 @@
 """
 Custom integration to integrate pod_point with Home Assistant.
-
-For more details about this integration, please refer to
-https://github.com/mattrayner/pod-point-home-assistant-component
 """
-
 import asyncio
 from datetime import timedelta
 import logging
 from pathlib import Path
-from typing import Dict, List
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.core_config import Config
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from podpointclient.charge import Charge
-from podpointclient.client import PodPointClient
-from podpointclient.pod import Pod
 
 from .const import (
     APP_IMAGE_URL_BASE,
@@ -34,12 +24,8 @@ from .const import (
     PLATFORMS,
     STARTUP_MESSAGE,
 )
-from .coordinator import PodPointDataUpdateCoordinator
-from .services import async_deregister_services, async_register_services
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
-
-# pylint: disable=unused-argument
 
 
 async def async_setup(hass: HomeAssistant, config: Config):
@@ -49,54 +35,45 @@ async def async_setup(hass: HomeAssistant, config: Config):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up this integration using UI."""
-    # If data for pod_point is not setup, prime it
+    # Defer heavy imports to prevent blocking the main event loop during loader.py
+    from podpointclient.client import PodPointClient
+    from .coordinator import PodPointDataUpdateCoordinator
+    from .services import async_register_services
+
     if hass.data.get(DOMAIN) is None:
         hass.data.setdefault(DOMAIN, {})
         _LOGGER.info(STARTUP_MESSAGE)
 
     email = entry.data.get(CONF_EMAIL)
     password = entry.data.get(CONF_PASSWORD)
-
     session = async_get_clientsession(hass)
 
-    # If http debug is set, use that, or default
-    try:
-        http_debug = entry.options[CONF_HTTP_DEBUG]
-    except KeyError:
-        http_debug = DEFAULT_HTTP_DEBUG
+    http_debug = entry.options.get(CONF_HTTP_DEBUG, DEFAULT_HTTP_DEBUG)
 
-    client = PodPointClient(
-        username=email, password=password, session=session, http_debug=http_debug
-    )
+    def create_client():
+        return PodPointClient(
+            username=email, password=password, session=session, http_debug=http_debug
+        )
 
-    # If a scan interval is set, use that, or default
-    try:
-        scan_interval = timedelta(seconds=entry.options[CONF_SCAN_INTERVAL])
-    except KeyError:
-        scan_interval = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+    client = await hass.async_add_executor_job(create_client)
 
-    # Setup our data coordinator with the desired scan interval
+    scan_interval = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
+
     coordinator = PodPointDataUpdateCoordinator(
         hass, client=client, scan_interval=scan_interval
     )
 
-    # FIX: Wrap the first refresh in the executor to prevent blocking the loop
-    await hass.async_add_executor_job(
-        coordinator.config_entry_first_refresh_sync
-    )
+    await coordinator.async_config_entry_first_refresh()
 
-    # Given a successful inital refresh, store this coordinator for this specific config entry
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Setup static image asset serving
-    should_cache = False
     files_path = Path(__file__).parent / "static"
+    should_cache = False
     if hass.http:
         await hass.http.async_register_static_paths(
             [StaticPathConfig(APP_IMAGE_URL_BASE, str(files_path), should_cache)]
         )
 
-    # For every platform defined, check if the user has disabled it. If not, set it up
     for platform in PLATFORMS:
         if entry.options.get(platform, True):
             coordinator.platforms.append(platform)
@@ -104,8 +81,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await hass.config_entries.async_forward_entry_setups(entry, coordinator.platforms)
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
-
-    # Register the services
     await async_register_services(hass)
 
     return True
